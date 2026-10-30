@@ -1,0 +1,15 @@
+# 가상환경·캐시
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# 데이터: 용량이 크고 python main.py --step collect 로 언제든 다시 받을 수 있다
+data/**/*
+!data/**/
+!data/**/.gitkeep
+
+# 실행 결과물: python main.py 로 다시 만들 수 있다
+reports/**/*
+!reports/**/
+!reports/**/.gitkeep

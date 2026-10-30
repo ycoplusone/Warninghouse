@@ -1,0 +1,77 @@
+# Canary Dagger 설정 파일
+# 티커, 기간, 전략 파라미터는 코드에 하드코딩하지 않고 여기서 관리한다.
+
+data:
+  start_date: "2010-01-01"
+  end_date: null            # null이면 오늘까지
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  features_dir: "data/features"             # ③ 지표·위험 신호를 붙인 종목별 데이터
+  signals_path: "data/signals/risk_signals.csv"  # ③ 시장 전체 위험 신호 (카나리아·VIX)
+
+# 투자 대상 자산
+universe:
+  offensive: ["SPY", "QQQ"]   # 공격 자산 (주식)
+  defensive: ["SHY", "IEF"]   # 방어 자산 (단기·중기 국채)
+  benchmark: "SPY"
+
+# 한국 시장 투자 대상 (위험 신호는 미국 카나리아·VIX를 그대로 쓰고, 전날 미국 신호를 적용)
+universe_kr:
+  offensive: ["069500"]             # KODEX 200
+  defensive: ["114260", "148070"]   # KODEX 국고채3년, KIWOOM 국고채10년 (미국 SHY+IEF에 대응)
+  benchmark: "069500"
+
+# 카나리아 자산: 하락 추세면 위험 신호로 보고 방어 자산으로 전환
+canary:
+  tickers: ["EEM", "HYG"]     # 신흥국 주식, 하이일드 채권
+  vix_ticker: "^VIX"
+  vix_threshold: 30           # VIX가 이 값을 넘으면 주식 비중 축소 (null이면 VIX 경보 사용 안 함)
+  method: "momentum"          # 카나리아 판단 방식: momentum(13612W 모멘텀) / sma200(200일선 하회)
+
+# 데이터 정제 설정
+cleaning:
+  outlier_threshold: 0.4      # 하루 ±40% 넘게 튀었다가 다음 날 ±40% 넘게 되돌아오면 이상치로 판단
+  ffill_limit: 5              # 빈 가격을 직전 값으로 채우는 최대 연속 일수
+
+# 지표 파라미터
+indicators:
+  sma_short: 50
+  sma_long: 200
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  rsi_period: 14
+  bollinger_period: 20
+  bollinger_std: 2
+
+# 백테스트 설정
+backtest:
+  initial_cash: 10000000      # 초기 자금 (원)
+  fee_rate: 0.00015           # 거래 수수료
+  slippage: 0.001             # 슬리피지
+  rebalance: "monthly"        # monthly: 매월 말 신호로 비중 조정 / daily: 신호가 바뀔 때마다 조정
+  equity_by_level:            # 위험 단계별 주식(공격 자산) 비중. 나머지는 방어 자산
+    0: 1.0                    # 정상
+    1: 0.5                    # 주의
+    2: 0.0                    # 위험
+
+# ⑤ 전략 개선 설정
+optimize:
+  train_end: "2018-12-31"     # 학습 기간 끝 (이 기간 성적으로만 조합을 고른다)
+  test_start: "2019-01-01"    # 검증 기간 시작 (고른 조합을 처음 시험하는 기간)
+  grid:                       # 바꿔 볼 후보 값 (모든 조합을 시험)
+    defensive:                                     # 방어 자산
+      - ["SHY", "IEF"]                             #   단기+중기 국채 (현재 설정)
+      - ["SHY"]                                    #   단기 국채
+      - ["IEF"]                                    #   중기 국채
+      - ["BIL"]                                    #   초단기 국채 (현금과 비슷)
+      - ["GLD"]                                    #   금
+      - ["UUP"]                                    #   달러
+      - ["SHY", "GLD"]                             #   단기 국채 + 금
+      - ["BIL", "GLD"]                             #   초단기 국채 + 금
+    caution_equity: [0.5, 0.75, 1.0]               # '주의' 단계의 주식 비중
+    vix_threshold: [25, 30, 35, null]              # VIX 기준값 (null = 사용 안 함)
+    canary_method: ["momentum", "sma200"]          # 카나리아 판단 방식
+
+report:
+  output_dir: "reports"

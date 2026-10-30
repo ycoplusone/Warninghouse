@@ -1,0 +1,9 @@
+pandas
+numpy
+yfinance
+pykrx
+finance-datareader
+vectorbt
+backtrader
+pyyaml
+matplotlib
