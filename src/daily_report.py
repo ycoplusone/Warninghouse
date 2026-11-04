@@ -37,12 +37,14 @@ FRIENDLY_NAMES = {
     "UUP": "달러",
     "EEM": "신흥국 주식",
     "HYG": "하이일드 채권",
+    "AGG": "미국 종합채권",
     "^VIX": "VIX 공포지수",
 }
 
 CANARY_EXPLAIN = {
     "EEM": "세계 투자자들이 위험을 피하기 시작하면 가장 먼저 팔리는 경향이 있습니다.",
     "HYG": "신용도가 낮은 회사들의 채권입니다. 기업 부도 걱정이 커지면 먼저 떨어집니다.",
+    "AGG": "미국 국채·회사채를 모두 담은 채권 묶음입니다. 금리가 빠르게 오르는 등 채권시장 전체가 흔들리면 떨어집니다.",
 }
 
 METHOD_EXPLAIN = {
@@ -150,16 +152,35 @@ def trend_chip(up: bool, up_text: str = "상승 추세", down_text: str = "하�
     return status_chip(0).replace("정상", up_text) if up else status_chip(2).replace("위험", down_text)
 
 
-def level_sentence(level: int, bad: int, n: int, vix_alert: bool, equity: float) -> str:
-    if level == 0:
-        why = f"카나리아 {n}개가 모두 상승 추세이고 VIX도 안정적입니다."
-    elif level == 1:
-        why = f"카나리아 {n}개 중 {bad}개가 하락 추세로 돌아섰습니다."
-    elif vix_alert:
-        why = "VIX(공포지수)가 경보 기준을 넘었습니다."
+def level_sentence(
+    canary_names: list[str], down_names: list[str], vix: float, vix_threshold: float | None, equity: float
+) -> str:
+    """경보 단계의 이유를 한 문장으로 쓴다. 카나리아와 VIX를 따로 밝혀 '몇 개 중 몇 개'가 헷갈리지 않게 한다.
+
+    Args:
+        canary_names: 카나리아 자산 이름 전체 (예: ['신흥국 주식', '하이일드 채권', '미국 종합채권'])
+        down_names: 그중 하락 추세인 자산 이름
+        vix: 오늘 VIX 값
+        vix_threshold: VIX 경보 기준값 (None이면 VIX 경보를 쓰지 않음)
+        equity: 이 단계에서의 주식 비중
+    """
+    n, k = len(canary_names), len(down_names)
+    all_text = "·".join(canary_names)
+    if k == 0:
+        canary = f"카나리아 {n}개({all_text})가 모두 상승 추세"
+    elif k == n:
+        canary = f"카나리아 {n}개({all_text})가 모두 하락 추세"
     else:
-        why = f"카나리아 {n}개가 모두 하락 추세입니다."
-    return f"{why} 이 전략이라면 주식 비중을 <strong>{equity:.0%}</strong>로 둡니다."
+        canary = f"카나리아 {n}개({all_text}) 중 {k}개({'·'.join(down_names)})가 하락 추세"
+
+    # VIX는 카나리아와 별개인 경보다. 기준값을 넘으면(초과) 카나리아와 상관없이 '위험'이 된다.
+    if vix_threshold is None:
+        vix_text = f"VIX는 {vix:.1f}(경보 사용 안 함)"
+    elif vix > vix_threshold:
+        vix_text = f"VIX는 {vix:.1f}(경보 기준 {vix_threshold} 초과)"
+    else:
+        vix_text = f"VIX는 {vix:.1f}(경보 기준 {vix_threshold} 이하)"
+    return f"{canary}이고, {vix_text}입니다. 이 전략이라면 주식 비중을 <strong>{equity:.0%}</strong>로 둡니다."
 
 
 def since_text(level: pd.Series) -> str:
@@ -377,7 +398,9 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
     last = sig.iloc[-1]
     as_of = sig.index[-1]
     level = int(last["Risk_Level"])
-    n = len(canary_cfg["tickers"])
+    # 카나리아 이름 전체와, 그중 오늘 점수가 음수(하락 추세)인 것
+    canary_names = [FRIENDLY_NAMES.get(t, t) for t in canary_cfg["tickers"]]
+    down_names = [FRIENDLY_NAMES.get(t, t) for t in canary_cfg["tickers"] if last[f"Score_{t}"] < 0]
     year = sig.loc[as_of - pd.DateOffset(years=1):]
 
     # 지난달 말 신호 = 지금 보유 비중의 근거 (월말 리밸런싱)
@@ -389,7 +412,7 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
     hero = (
         f"<section class='hero'><div class='big' style='background:var({st['var']})' aria-hidden='true'>{st['icon']}</div>"
         f"<div><p class='level'>경보 단계: {st['label']}</p>"
-        f"<p>{level_sentence(level, int(last['Canary_Bad']), n, bool(last['VIX_Alert']), equity_by_level[level])}</p>"
+        f"<p>{level_sentence(canary_names, down_names, float(last['VIX']), canary_cfg['vix_threshold'], equity_by_level[level])}</p>"
         f"<p><small>{since_text(sig['Risk_Level'])}</small></p></div></section>"
     )
 
