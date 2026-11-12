@@ -153,7 +153,8 @@ def trend_chip(up: bool, up_text: str = "상승 추세", down_text: str = "하�
 
 
 def level_sentence(
-    canary_names: list[str], down_names: list[str], vix: float, vix_threshold: float | None, equity: float
+    canary_names: list[str], down_names: list[str], vix: float, vix_threshold: float | None, equity: float,
+    term: float | None = None, term_threshold: float | None = None,
 ) -> str:
     """경보 단계의 이유를 한 문장으로 쓴다. 카나리아와 VIX를 따로 밝혀 '몇 개 중 몇 개'가 헷갈리지 않게 한다.
 
@@ -163,6 +164,8 @@ def level_sentence(
         vix: 오늘 VIX 값
         vix_threshold: VIX 경보 기준값 (None이면 VIX 경보를 쓰지 않음)
         equity: 이 단계에서의 주식 비중
+        term: 오늘 VIX ÷ VIX3M (None이면 문장에 넣지 않음)
+        term_threshold: 기간구조 경보 기준값
     """
     n, k = len(canary_names), len(down_names)
     all_text = "·".join(canary_names)
@@ -180,6 +183,9 @@ def level_sentence(
         vix_text = f"VIX는 {vix:.1f}(경보 기준 {vix_threshold} 초과)"
     else:
         vix_text = f"VIX는 {vix:.1f}(경보 기준 {vix_threshold} 이하)"
+    if term is not None and term_threshold is not None:
+        state = "역전, 경보" if term > term_threshold else "정상"
+        vix_text += f", VIX 기간구조는 {term:.2f}({state})"
     return f"{canary}이고, {vix_text}입니다. 이 전략이라면 주식 비중을 <strong>{equity:.0%}</strong>로 둡니다."
 
 
@@ -378,7 +384,7 @@ document.querySelectorAll('svg[data-spark]').forEach(svg => {
       l.setAttribute('y1', d.ys[i]); l.setAttribute('y2', d.ys[i]); });
     dot.setAttribute('visibility', 'visible');
     const v = d.values[i];
-    const txt = d.fmt === 'pct' ? (v >= 0 ? '+' : '') + v.toFixed(2) : v.toFixed(1);
+    const txt = d.fmt === 'pct' ? (v >= 0 ? '+' : '') + v.toFixed(2) : (d.fmt === 'ratio' ? v.toFixed(2) : v.toFixed(1));
     showTip(d.dates[i] + '  ' + d.label + ' ' + txt, e);
   });
   svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
@@ -401,6 +407,10 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
     # 카나리아 이름 전체와, 그중 오늘 점수가 음수(하락 추세)인 것
     canary_names = [FRIENDLY_NAMES.get(t, t) for t in canary_cfg["tickers"]]
     down_names = [FRIENDLY_NAMES.get(t, t) for t in canary_cfg["tickers"] if last[f"Score_{t}"] < 0]
+    # VIX 기간구조 (설정에서 끄면 컬럼이 없다)
+    has_term = "VIX_Term" in sig and pd.notna(last.get("VIX_Term"))
+    term_val = float(last["VIX_Term"]) if has_term else None
+    term_thr = canary_cfg.get("vix_term_threshold") if has_term else None
     year = sig.loc[as_of - pd.DateOffset(years=1):]
 
     # 지난달 말 신호 = 지금 보유 비중의 근거 (월말 리밸런싱)
@@ -412,7 +422,7 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
     hero = (
         f"<section class='hero'><div class='big' style='background:var({st['var']})' aria-hidden='true'>{st['icon']}</div>"
         f"<div><p class='level'>경보 단계: {st['label']}</p>"
-        f"<p>{level_sentence(canary_names, down_names, float(last['VIX']), canary_cfg['vix_threshold'], equity_by_level[level])}</p>"
+        f"<p>{level_sentence(canary_names, down_names, float(last['VIX']), canary_cfg['vix_threshold'], equity_by_level[level], term_val, term_thr)}</p>"
         f"<p><small>{since_text(sig['Risk_Level'])}</small></p></div></section>"
     )
 
@@ -444,6 +454,20 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
         f"<p class='value'>현재 <strong>{vix_val:.1f}</strong> "
         f"<small>(점선 = 경보 기준 {vix_thr if vix_thr is not None else '없음'})</small></p></div>"
     )
+    if term_thr is not None:
+        if term_val > term_thr:
+            term_chip = status_chip(2).replace("위험", "역전")
+            term_text = "단기 공포가 장기 공포보다 큽니다. 시장이 지금 당장 겁먹은 상태입니다."
+        else:
+            term_chip = status_chip(0)
+            term_text = "단기 공포가 장기 공포보다 작은, 평소 모습입니다."
+        cards.append(
+            f"<div class='card'><h3>VIX 기간구조 <small>^VIX ÷ ^VIX3M</small></h3><div>{term_chip}</div>"
+            f"<p class='explain'>오늘의 공포(VIX)를 석 달 공포(VIX3M)로 나눈 값입니다. 평소엔 1보다 작고, "
+            f"1을 넘으면 '역전'입니다. {esc(term_text)}</p>"
+            f"{sparkline_svg(year['VIX_Term'], float(term_thr), 'ratio', '비율')}"
+            f"<p class='value'>현재 <strong>{term_val:.2f}</strong> <small>(점선 = 경보 기준 {term_thr})</small></p></div>"
+        )
     reasons = f"<section><h2>왜 이렇게 판단했나</h2><div class='cards'>{''.join(cards)}</div></section>"
 
     # 3) 1년 경보 기록

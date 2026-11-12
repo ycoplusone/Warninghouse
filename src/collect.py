@@ -235,6 +235,7 @@ def get_all_tickers(config: dict, raw_dir: Path) -> list[str]:
         + [universe["benchmark"]]
         + canary["tickers"]
         + [canary["vix_ticker"]]
+        + ([canary["vix3m_ticker"]] if canary.get("vix3m_ticker") else [])
         + storage.list_tickers(raw_dir)
     )
     return list(dict.fromkeys(tickers))  # 순서를 유지하면서 중복 제거
