@@ -167,9 +167,10 @@ def run(config: dict, tickers: list[str] | None = None) -> dict[str, Path]:
 
     last = signals.dropna(subset=["Risk_Level"]).iloc[-1]
     scores = ", ".join(f"{c[6:]} {last[c]:+.3f}" for c in signals.columns if c.startswith("Score_"))
+    term = f", VIX÷VIX3M {last['VIX_Term']:.2f}" if "VIX_Term" in signals else ""
     logger.info(
-        "시장 위험 신호 (%s): %s — 카나리아 점수 [%s], VIX %.1f",
-        last.name.date(), risk.RISK_LABELS[int(last["Risk_Level"])], scores, last["VIX"],
+        "시장 위험 신호 (%s): %s — 카나리아 점수 [%s], VIX %.1f%s",
+        last.name.date(), risk.RISK_LABELS[int(last["Risk_Level"])], scores, last["VIX"], term,
     )
 
     logger.info("분석 시작: %d개 종목", len(tickers))

@@ -26,6 +26,9 @@ canary:
   tickers: ["EEM", "HYG", "AGG"]   # 신흥국 주식, 하이일드 채권, 미국 종합채권
   vix_ticker: "^VIX"
   vix_threshold: 30           # VIX가 이 값을 넘으면 주식 비중 축소 (null이면 VIX 경보 사용 안 함)
+  vix3m_ticker: "^VIX3M"      # 3개월 VIX (VIX 기간구조 계산용)
+  vix_term_threshold: 1.0     # VIX ÷ VIX3M이 이 값을 넘으면(단기 공포 > 장기 공포, '역전') 경보 (null이면 사용 안 함)
+  vix_term_level: 1           # 기간구조 경보 시 최소 위험 단계 (1=주의, 2=위험)
   method: "momentum"          # 카나리아 판단 방식: momentum(13612W 모멘텀) / sma200(200일선 하회)
 
 # 데이터 정제 설정

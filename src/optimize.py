@@ -99,11 +99,12 @@ def run(config: dict, tickers: list[str] | None = None) -> pd.DataFrame:
     all_defensive = list(dict.fromkeys(t for group in grid["defensive"] + [uni["defensive"]] for t in group))
     closes = backtest.load_closes(list(dict.fromkeys(offensive + all_defensive + [benchmark])), processed_dir)
     canary_closes, vix_close = risk.load_canary_closes(config, processed_dir)
+    term = risk.term_kwargs(config, processed_dir)  # VIX 기간구조 경보는 설정값으로 고정 (그리드 탐색 대상 아님)
 
     current_key = (config["canary"]["method"], config["canary"]["vix_threshold"])
     level_keys = set(itertools.product(grid["canary_method"], grid["vix_threshold"])) | {current_key}
     levels = {
-        (m, v): risk.compute_risk_signals(canary_closes, vix_close, v, m)["Risk_Level"] for m, v in level_keys
+        (m, v): risk.compute_risk_signals(canary_closes, vix_close, v, m, **term)["Risk_Level"] for m, v in level_keys
     }
 
     # 모든 방식의 신호가 준비된 날부터 시작해 같은 기간에서 비교한다

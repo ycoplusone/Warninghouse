@@ -5,6 +5,10 @@
   - HYG(하이일드 채권): 기업 부도 위험이 커지면 먼저 빠지는 경향
   - AGG(미국 종합채권): 금리가 빠르게 오르는 등 채권시장 전체가 흔들리면 빠지는 경향
   - VIX(변동성 지수) : 시장 공포가 커지면 급등
+  - VIX 기간구조(VIX ÷ VIX3M): '오늘의 공포'(30일 예상 변동성)를 '석 달 뒤까지의 공포'(VIX3M)로 나눈 값
+      평소에는 1보다 작다(지금보다 먼 미래가 더 불확실하다고 보는 게 정상).
+      1을 넘으면(이른바 '역전') 시장이 지금 당장 공포에 빠졌다는 뜻이다.
+      VIX가 원래 낮던 시기에도 갑자기 튀면 잡아내므로, '30 초과' 같은 고정 기준을 보완한다.
 
 카나리아 점수 (설정 canary.method로 선택, 둘 다 점수가 0보다 작으면 '하락 추세')
   momentum : 13612W 모멘텀 ('DAA' 전략에서 쓰는 방식)
@@ -17,6 +21,7 @@
     0 = 정상 : 카나리아 모두 상승 추세, VIX 안정
     1 = 주의 : 카나리아 일부 하락 추세
     2 = 위험 : 카나리아 모두 하락 추세, 또는 VIX가 기준값 초과
+    VIX 기간구조 경보(Term_Alert)가 켜지면 단계를 최소 canary.vix_term_level(기본 1=주의)로 올린다.
 """
 
 import logging
@@ -48,11 +53,19 @@ def sma200_distance(close: pd.Series) -> pd.Series:
 CANARY_SCORES = {"momentum": momentum_13612w, "sma200": sma200_distance}
 
 
+def vix_term_ratio(vix_close: pd.Series, vix3m_close: pd.Series) -> pd.Series:
+    """VIX 기간구조 비율 = VIX ÷ VIX3M. 1보다 크면 '단기 공포가 장기보다 큰' 역전 상태."""
+    return vix_close / vix3m_close
+
+
 def compute_risk_signals(
     canary_closes: dict[str, pd.Series],
     vix_close: pd.Series,
     vix_threshold: float | None,
     method: str = "momentum",
+    vix3m_close: pd.Series | None = None,
+    term_threshold: float | None = None,
+    term_level: int = 1,
 ) -> pd.DataFrame:
     """카나리아 자산과 VIX로 날짜별 위험 신호를 계산한다.
 
@@ -61,6 +74,9 @@ def compute_risk_signals(
         vix_close: VIX 종가 Series
         vix_threshold: 이 값을 넘으면 위험으로 본다. None이면 VIX 경보를 쓰지 않는다.
         method: 카나리아 점수 방식 ('momentum' 또는 'sma200')
+        vix3m_close: VIX3M 종가 Series. None이면 기간구조 경보를 쓰지 않는다.
+        term_threshold: VIX÷VIX3M이 이 값을 넘으면 기간구조 경보. None이면 쓰지 않는다.
+        term_level: 기간구조 경보가 켜졌을 때 최소 위험 단계 (1=주의, 2=위험)
 
     Returns:
         날짜 인덱스, 컬럼:
@@ -68,6 +84,8 @@ def compute_risk_signals(
           Canary_Bad   : 점수가 음수인 카나리아 개수
           VIX          : VIX 종가
           VIX_Alert    : VIX가 기준값 초과면 1
+          VIX_Term     : VIX ÷ VIX3M (vix3m_close가 있을 때만)
+          Term_Alert   : VIX_Term이 기준값 초과면 1 (vix3m_close가 있을 때만)
           Risk_Level   : 0(정상) / 1(주의) / 2(위험). 점수 계산 전(처음 약 1년)은 NaN
     """
     score_fn = CANARY_SCORES[method]
@@ -86,6 +104,14 @@ def compute_risk_signals(
     n = len(score_cols)
     level = signals["Canary_Bad"].map(lambda bad: 0 if bad == 0 else (2 if bad == n else 1))
     level[signals["VIX_Alert"] == 1] = 2
+
+    # VIX 기간구조: 역전(비율 > 기준)이면 단계를 최소 term_level로 올린다 (이미 더 높으면 그대로)
+    if vix3m_close is not None:
+        signals["VIX_Term"] = vix_term_ratio(signals["VIX"], vix3m_close.reindex(signals.index))
+        term_alert = signals["VIX_Term"] > term_threshold if term_threshold is not None else False
+        signals["Term_Alert"] = pd.Series(term_alert, index=signals.index).astype(int)
+        level[signals["Term_Alert"] == 1] = level[signals["Term_Alert"] == 1].clip(lower=term_level)
+
     signals["Risk_Level"] = level.where(ready)
     return signals
 
@@ -118,8 +144,33 @@ def load_canary_closes(config: dict, processed_dir: Path) -> tuple[dict[str, pd.
     return {t: close_of(t) for t in canary_cfg["tickers"]}, close_of(canary_cfg["vix_ticker"])
 
 
+def load_vix3m_close(config: dict, processed_dir: Path) -> pd.Series | None:
+    """정제된 VIX3M 종가를 읽는다. 설정에 vix3m_ticker가 없거나(null) 기간구조 경보를 끄면 None."""
+    canary_cfg = config["canary"]
+    ticker = canary_cfg.get("vix3m_ticker")
+    if ticker is None or canary_cfg.get("vix_term_threshold") is None:
+        return None
+    path = storage.find_path(processed_dir, ticker)
+    if path is None:
+        raise FileNotFoundError(f"[{ticker}] 정제 파일이 없습니다. 먼저 collect, clean 단계를 실행하세요.")
+    return storage.load_prices(path)["Close"]
+
+
+def term_kwargs(config: dict, processed_dir: Path) -> dict:
+    """compute_risk_signals에 넘길 VIX 기간구조 인자 (설정에서 읽음)."""
+    canary_cfg = config["canary"]
+    return {
+        "vix3m_close": load_vix3m_close(config, processed_dir),
+        "term_threshold": canary_cfg.get("vix_term_threshold"),
+        "term_level": canary_cfg.get("vix_term_level", 1),
+    }
+
+
 def load_risk_signals(config: dict, processed_dir: Path) -> pd.DataFrame:
     """정제된 카나리아·VIX 파일을 읽어 설정대로 위험 신호를 계산한다."""
     canary_cfg = config["canary"]
     canary_closes, vix_close = load_canary_closes(config, processed_dir)
-    return compute_risk_signals(canary_closes, vix_close, canary_cfg["vix_threshold"], canary_cfg["method"])
+    return compute_risk_signals(
+        canary_closes, vix_close, canary_cfg["vix_threshold"], canary_cfg["method"],
+        **term_kwargs(config, processed_dir),
+    )
