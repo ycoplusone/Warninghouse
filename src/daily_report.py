@@ -8,8 +8,9 @@
   2. 왜 그렇게 판단했나: 카나리아 자산·VIX 각각의 상태 + 최근 1년 흐름
   3. 최근 1년 경보 기록 (날짜별 색 띠)
   4. 전략이라면 지금 어떤 비중일지 (미국·한국)
-  5. 관심 종목 한눈에 (추세, 과열 여부, 1개월 수익률)
-  6. 이 신호를 얼마나 믿어도 되나 (백테스트 결과)
+  5. 내 종목 추세 카드 (직접 추가한 종목별 1년 그래프 + 추세가 며칠째인지 + 시장 경보와 함께 본 해석)
+  6. 관심 종목 한눈에 (추세, 과열 여부, 1개월 수익률)
+  7. 이 신호를 얼마나 믿어도 되나 (백테스트 결과)
 """
 
 import html
@@ -20,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src import risk, storage
+from src import indicators, risk, storage
 from src.collect import is_korean_ticker
 from src.config import PROJECT_ROOT
 
@@ -259,6 +260,199 @@ def watchlist_rows(features_dir: Path, exclude: set[str]) -> tuple[list[str], li
     return us, kr
 
 
+# ---------------------------------------------------------------------------
+# 내 종목 추세 카드
+# ---------------------------------------------------------------------------
+
+def strategy_tickers(config: dict) -> set[str]:
+    """설정 파일에서 전략·위험 신호용으로 쓰는 티커 전체 (추세 카드 자동 선택에서 뺀다)."""
+    canary = config["canary"]
+    used = set(canary["tickers"]) | {canary["vix_ticker"]}
+    if canary.get("vix3m_ticker"):
+        used.add(canary["vix3m_ticker"])
+    for key in ("universe", "universe_kr"):
+        uni = config.get(key, {})
+        used |= set(uni.get("offensive", [])) | set(uni.get("defensive", []))
+        if uni.get("benchmark"):
+            used.add(uni["benchmark"])
+    for group in config.get("optimize", {}).get("grid", {}).get("defensive", []):
+        used |= set(group)
+    return used
+
+
+def price_chart_svg(df: pd.DataFrame, lines: list[tuple[str, str, str]], decimals: int) -> str:
+    """종가와 이동평균선을 한 축에 그린 1년 가격 그래프. 마우스를 올리면 그날의 값이 보인다.
+
+    Args:
+        df: 날짜 인덱스 DataFrame (최근 1년)
+        lines: (컬럼 이름, CSS 클래스, 표시 이름) 목록. 첫 번째가 종가(따라다니는 점이 붙는 선).
+        decimals: 툴팁 숫자의 소수점 자리 (한국 0, 미국 2)
+    """
+    w, h, pad = 600, 160, 6
+    cols = [c for c, _, _ in lines]
+    lo, hi = df[cols].min().min(), df[cols].max().max()
+    span = (hi - lo) or 1
+
+    def x(i):
+        return pad + i * (w - 2 * pad) / max(len(df) - 1, 1)
+
+    def y(v):
+        return h - pad - (v - lo) / span * (h - 2 * pad)
+
+    polylines = []
+    for col, cls, _ in reversed(lines):  # 종가 선을 맨 위에 그리려고 거꾸로
+        pts = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(df[col].values) if pd.notna(v))
+        polylines.append(f'<polyline points="{pts}" class="{cls}" />')
+
+    close = df[cols[0]]
+    data = json.dumps({
+        "dates": [d.strftime("%Y-%m-%d") for d in df.index],
+        "names": [name for _, _, name in lines],
+        "values": [[None if pd.isna(v) else round(float(v), 4) for v in df[c].values] for c in cols],
+        "dec": decimals,
+        "xs": [round(x(i), 1) for i in range(len(df))],
+        "ys": [round(y(v), 1) for v in close.values],
+    })
+    return (
+        f'<svg class="price" viewBox="0 0 {w} {h}" preserveAspectRatio="none" role="img" '
+        f'aria-label="최근 1년 주가와 이동평균선" data-price=\'{esc(data)}\'>'
+        f'{"".join(polylines)}'
+        f'<g class="end-dot">{dot_svg(x(len(df) - 1), y(close.iloc[-1]))}</g>'
+        f'<line class="cross" x1="0" x2="0" y1="0" y2="{h}" visibility="hidden" />'
+        f'<g class="hover-dot" visibility="hidden">{dot_svg(0, 0)}</g>'
+        f'</svg>'
+    )
+
+
+def signed_pct(value: float) -> str:
+    """+12.3% / -4.5%를 ▲▼ 기호와 색으로 표시 (색만으로 구분하지 않도록 기호를 함께 쓴다)."""
+    if pd.isna(value):
+        return "-"
+    cls, mark = ("up", "▲") if value > 0 else ("down", "▼")
+    return f"<span class='{cls}'>{mark} {abs(value):.1%}</span>"
+
+
+def trend_card(ticker: str, path: Path, df: pd.DataFrame, short: int, long: int) -> str:
+    """종목 하나의 추세 카드 HTML.
+
+    담는 내용: 추세(200일선 위/아래)와 며칠째인지, 1년 가격 그래프, 200일선 대비 거리,
+    1년 최고가 대비 낙폭, RSI, 골든/데드크로스, 그리고 시장 경보와 함께 본 한 줄 해석.
+    """
+    name = friendly_name(ticker, path)
+    korean = is_korean_ticker(ticker)
+    last = df.iloc[-1]
+    as_of = df.index[-1]
+    title = f"<h3>{esc(name)} <small>{esc(ticker)} · {as_of.date()}</small></h3>"
+    close = df["Close"]
+    long_col, short_col = f"SMA_{long}", f"SMA_{short}"
+
+    # 200일선은 상장 후 200거래일이 지나야 계산된다 → 그 전에는 추세를 말할 수 없다
+    trend = df["Trend_Up"].dropna()
+    if trend.empty:
+        return (f"<div class='card trend'>{title}<p class='explain'>아직 데이터가 {len(df)}거래일뿐이라 "
+                f"{long}일선을 계산할 수 없습니다. {long}거래일 넘게 쌓이면 추세가 표시됩니다.</p></div>")
+
+    up = bool(trend.iloc[-1])
+    start = indicators.streak_start(trend)
+    days = len(trend.loc[start:])
+    days_text = f"{days}거래일째" + (" 이상" if start == trend.index[0] else "")
+    gap = last["Close"] / last[long_col] - 1                       # 200일선과의 거리
+    dd = indicators.drawdown_from_high(close).iloc[-1]             # 1년 최고가 대비
+    month = close.iloc[-1] / close.iloc[-22] - 1 if len(close) > 22 else float("nan")
+    rsi = last.get("RSI")
+    if pd.isna(rsi):
+        rsi_text = "-"
+    else:
+        rsi_text = f"{rsi:.0f} <small>({'과열' if rsi >= 70 else '침체' if rsi <= 30 else '보통'})</small>"
+
+    # 문장 1: 추세
+    where = "위" if up else "아래"
+    sentences = [f"주가가 {long}일선보다 {abs(gap):.1%} {where}에 있고, "
+                 f"{'상승' if up else '하락'} 추세가 <strong>{days_text}</strong> 이어지고 있습니다 "
+                 f"<small>({start.date()}부터)</small>."]
+    # 문장 2: 골든/데드크로스
+    golden = df["Golden"].dropna()
+    if not golden.empty:
+        g_start = indicators.streak_start(golden)
+        g_name = "골든크로스" if golden.iloc[-1] else "데드크로스"
+        g_where = "위" if golden.iloc[-1] else "아래"
+        sentences.append(f"{short}일선이 {long}일선 {g_where}에 있는 <strong>{g_name}</strong> 상태입니다 "
+                         f"<small>({g_start.date()}부터)</small>.")
+    # 문장 3: 시장 경보와 함께 보기
+    market = last.get("Risk_Level")
+    if pd.notna(market):
+        m = int(market)
+        m_label = LEVEL_STYLE[m]["label"]
+        if up and m == 0:
+            combo = "종목과 시장 모두 양호한 상태입니다."
+        elif up:
+            combo = "종목은 버티고 있지만 시장 전체의 위험 신호가 켜져 있어 함께 살펴볼 때입니다."
+        elif m == 0:
+            combo = "시장은 괜찮은데 이 종목만 약한 상태입니다. 종목 자체의 이유가 있는지 살펴볼 때입니다."
+        else:
+            combo = "종목과 시장이 모두 약한 상태입니다."
+        sentences.append(f"시장 경보는 '{m_label}'입니다. {combo}")
+
+    chart = price_chart_svg(
+        df.loc[as_of - pd.DateOffset(years=1):],
+        [("Close", "l-close", "종가"), (short_col, "l-short", f"{short}일선"), (long_col, "l-long", f"{long}일선")],
+        decimals=0 if korean else 2,
+    )
+    legend = (
+        "<div class='legend'>"
+        "<span><svg class='swatch' viewBox='0 0 20 4'><line x1='0' y1='2' x2='20' y2='2' class='l-close'/></svg>종가</span>"
+        f"<span><svg class='swatch' viewBox='0 0 20 4'><line x1='0' y1='2' x2='20' y2='2' class='l-short'/></svg>{short}일선</span>"
+        f"<span><svg class='swatch' viewBox='0 0 20 4'><line x1='0' y1='2' x2='20' y2='2' class='l-long'/></svg>{long}일선</span>"
+        "</div>"
+    )
+    stats = (
+        "<div class='stats'>"
+        f"<div><span class='k'>{long}일선 대비</span><span class='v'>{signed_pct(gap)}</span></div>"
+        f"<div><span class='k'>1년 최고가 대비</span><span class='v'>{signed_pct(dd) if dd < 0 else '최고가'}</span></div>"
+        f"<div><span class='k'>최근 1개월</span><span class='v'>{signed_pct(month)}</span></div>"
+        f"<div><span class='k'>RSI</span><span class='v'>{rsi_text}</span></div>"
+        "</div>"
+    )
+    return (
+        f"<div class='card trend'><div class='trend-head'>{title}<div>{trend_chip(up)} <small>{days_text}</small></div></div>"
+        f"{chart}{legend}{stats}<p class='explain'>{' '.join(sentences)}</p></div>"
+    )
+
+
+def trend_cards_section(config: dict, features_dir: Path) -> str:
+    """'내 종목 추세' 섹션. 대상 종목이 없으면 빈 문자열.
+
+    대상: 설정 report.trend_cards에 적은 종목. 비어 있으면(null) 직접 추가한 종목 전체를 자동으로 고른다
+    (설정 파일의 전략·카나리아 종목과, 값이 거의 안 움직이는 현금성 자산은 뺀다).
+    """
+    chosen = config.get("report", {}).get("trend_cards")
+    candidates = chosen or [t for t in storage.list_tickers(features_dir) if t not in strategy_tickers(config)]
+    ind = config["indicators"]
+
+    cards = []
+    for ticker in candidates:
+        path = storage.find_path(features_dir, ticker)
+        if path is None:
+            logger.warning("[%s] 추세 카드: 지표 파일이 없습니다. collect → clean → indicators를 먼저 실행하세요.", ticker)
+            continue
+        df = storage.load_prices(path)
+        vol = df["Return"].iloc[-60:].std() * (252 ** 0.5)
+        if not chosen and vol < LOW_VOL:  # 자동 선택일 때만 현금성 자산 제외
+            continue
+        cards.append(trend_card(ticker, path, df, ind["sma_short"], ind["sma_long"]))
+    if not cards:
+        return ""
+    return (
+        "<section><h2>내 종목 추세</h2>"
+        f"<div class='trend-cards'>{''.join(cards)}</div>"
+        f"<p class='note'><strong>{ind['sma_long']}일선</strong>: 최근 {ind['sma_long']}거래일(약 10개월) 종가의 평균. "
+        f"주가가 이 선 위면 상승 추세, 아래면 하락 추세로 봅니다. "
+        f"<strong>골든크로스</strong>: 짧은 평균({ind['sma_short']}일선)이 긴 평균({ind['sma_long']}일선) 위에 있는 상태로, "
+        f"최근 흐름이 장기 흐름보다 강하다는 뜻입니다. 반대는 데드크로스. "
+        "개별 종목은 시장 전체보다 훨씬 크게 움직이므로, 시장 경보가 '정상'이어도 따로 떨어질 수 있습니다.</p></section>"
+    )
+
+
 def trust_box(report_dir: Path) -> str:
     """백테스트 결과로 '이 신호를 얼마나 믿을 수 있나'를 설명."""
     path = report_dir / "backtest_summary.csv"
@@ -294,7 +488,7 @@ STYLE = """
   color-scheme: light;
   --bg: #f4f3f0; --surface: #fcfcfb; --border: #e6e5e1;
   --text: #0b0b0b; --text-2: #52514e; --text-3: #75736d;
-  --series-1: #2a78d6; --zero: #b9b7b0;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --zero: #b9b7b0;
   --status-good: #0ca30c; --status-warning: #fab219; --status-critical: #d03b3b;
   --up: #b42318; --down: #1d5fb8;
 }
@@ -303,7 +497,7 @@ STYLE = """
     color-scheme: dark;
     --bg: #121211; --surface: #1a1a19; --border: #33322f;
     --text: #f0efec; --text-2: #c3c2b7; --text-3: #9a988f;
-    --series-1: #3987e5; --zero: #5d5b55;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --zero: #5d5b55;
     --up: #ff7a6e; --down: #6ea8ff;
   }
 }
@@ -311,7 +505,7 @@ STYLE = """
   color-scheme: dark;
   --bg: #121211; --surface: #1a1a19; --border: #33322f;
   --text: #f0efec; --text-2: #c3c2b7; --text-3: #9a988f;
-  --series-1: #3987e5; --zero: #5d5b55;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --zero: #5d5b55;
   --up: #ff7a6e; --down: #6ea8ff;
 }
 * { box-sizing: border-box; }
@@ -343,9 +537,21 @@ small { color: var(--text-3); font-size: 12px; }
 .spark { height: 70px; margin-top: 4px; }
 .spark .line { fill: none; stroke: var(--series-1); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .spark .zero { stroke: var(--zero); stroke-width: 1; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
-.spark .dot-ring { stroke: var(--surface); stroke-width: 12; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.spark .dot-fill { stroke: var(--series-1); stroke-width: 8; stroke-linecap: round; vector-effect: non-scaling-stroke; }
-.spark .cross { stroke: var(--text-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.dot-ring { stroke: var(--surface); stroke-width: 12; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.dot-fill { stroke: var(--series-1); stroke-width: 8; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.cross { stroke: var(--text-3); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.price { width: 100%; height: 160px; display: block; overflow: visible; margin-top: 8px; }
+.l-close, .l-short, .l-long { fill: none; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.l-close { stroke: var(--series-1); stroke-width: 2; }
+.l-short { stroke: var(--series-2); stroke-width: 1.5; stroke-dasharray: 5 3; }
+.l-long { stroke: var(--series-3); stroke-width: 1.5; }
+.swatch { width: 20px; height: 4px; vertical-align: middle; margin-right: 4px; overflow: visible; }
+.trend-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px; }
+.trend-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.stats > div { display: flex; flex-direction: column; }
+.stats .k { font-size: 12px; color: var(--text-3); }
+.stats .v { font-size: 15px; font-weight: 600; }
 .timeline { height: 28px; border-radius: 4px; }
 .axis { display: flex; justify-content: space-between; color: var(--text-3); font-size: 12px; margin-top: 4px; }
 .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--text-2); }
@@ -361,6 +567,7 @@ td { border-bottom: 1px solid var(--border); padding: 8px; vertical-align: middl
 #tip { position: fixed; pointer-events: none; background: var(--text); color: var(--surface);
   padding: 4px 8px; border-radius: 6px; font-size: 12px; display: none; z-index: 10; white-space: nowrap; }
 @media (max-width: 560px) {
+  .stats { grid-template-columns: repeat(2, 1fr); }
   .hero { flex-direction: column; align-items: flex-start; }
   section { padding: 16px; }
 }
@@ -386,6 +593,20 @@ document.querySelectorAll('svg[data-spark]').forEach(svg => {
     const v = d.values[i];
     const txt = d.fmt === 'pct' ? (v >= 0 ? '+' : '') + v.toFixed(2) : (d.fmt === 'ratio' ? v.toFixed(2) : v.toFixed(1));
     showTip(d.dates[i] + '  ' + d.label + ' ' + txt, e);
+  });
+  svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
+});
+document.querySelectorAll('svg[data-price]').forEach(svg => {
+  const d = JSON.parse(svg.dataset.price);
+  const cross = svg.querySelector('.cross'), dot = svg.querySelector('.hover-dot');
+  const f = v => v == null ? '-' : v.toLocaleString('ko-KR', {minimumFractionDigits: d.dec, maximumFractionDigits: d.dec});
+  svg.addEventListener('mousemove', e => {
+    const i = indexAt(svg, e, d.dates.length);
+    cross.setAttribute('x1', d.xs[i]); cross.setAttribute('x2', d.xs[i]); cross.setAttribute('visibility', 'visible');
+    dot.querySelectorAll('line').forEach(l => { l.setAttribute('x1', d.xs[i]); l.setAttribute('x2', d.xs[i]);
+      l.setAttribute('y1', d.ys[i]); l.setAttribute('y2', d.ys[i]); });
+    dot.setAttribute('visibility', 'visible');
+    showTip(d.dates[i] + '  ' + d.names.map((n, k) => n + ' ' + f(d.values[k][i])).join(' · '), e);
   });
   svg.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
 });
@@ -511,6 +732,9 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
     watch += ("<p class='note'>추세: 가격이 최근 200일 평균보다 위면 상승, 아래면 하락. "
               "과열 여부: RSI 70 이상이면 단기간에 많이 오른 상태, 30 이하면 많이 빠진 상태.</p></section>")
 
+    # 5-1) 내 종목 추세 카드
+    trends = trend_cards_section(config, features_dir)
+
     # 6) 신뢰도
     trust = f"<section><h2>이 신호를 얼마나 믿어도 되나</h2>{trust_box(report_dir)}</section>"
 
@@ -520,7 +744,7 @@ def build_html(config: dict, signals: pd.DataFrame, features_dir: Path, report_d
         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
         f"<title>오늘의 시장 상태</title><style>{STYLE}</style></head><body><main>"
         f"<header><h1>오늘의 시장 상태</h1><p>미국 장 마감 {as_of.date()} 기준 · 생성 {generated}</p></header>"
-        f"{hero}{reasons}{history}{alloc}{watch}{trust}"
+        f"{hero}{reasons}{history}{alloc}{trends}{watch}{trust}"
         "<p class='note'>교육·연구 목적의 자료이며 투자 권유가 아닙니다. 과거 성과가 미래 수익을 보장하지 않습니다.</p>"
         f"</main><div id='tip' role='tooltip'></div><script>{SCRIPT}</script></body></html>"
     )

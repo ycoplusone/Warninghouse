@@ -153,10 +153,17 @@ explorer.exe "$(wslpath -w reports/market_today.html)"   # WSL에서 브라우�
   2. 왜 그렇게 판단했나: 신흥국 주식·하이일드 채권·VIX 각각의 상태와 최근 1년 흐름
   3. 최근 1년 경보 기록 (날짜별 색 띠)
   4. 이 전략이라면 지금 어떤 비중일지 (미국·한국)
-  5. 관심 종목 한눈에: 추세, 과열 여부, 최근 1개월 수익률
-  6. 이 신호를 얼마나 믿어도 되나: 백테스트 결과 요약
+  5. 내 종목 추세: 직접 추가한 종목마다 카드 한 장 (아래 설명)
+  6. 관심 종목 한눈에: 추세, 과열 여부, 최근 1개월 수익률
+  7. 이 신호를 얼마나 믿어도 되나: 백테스트 결과 요약
 - **저장:** `reports/market_today.html` (항상 최신), `reports/daily/market_<기준일>.html` (날짜별 사본)
 - 그래프에 마우스를 올리면 날짜와 값이 보입니다. 다크 모드와 모바일 화면도 지원합니다.
+- **내 종목 추세 카드:** `--ticker`로 직접 추가한 종목(예: 삼성전자, SK하이닉스)마다 다음을 보여 줍니다.
+  - 상승/하락 추세와 **며칠째** 이어지는지 (종가가 200일선 위면 상승, 아래면 하락)
+  - 최근 1년 가격 그래프 + 50일선(점선) + 200일선
+  - 200일선 대비 거리, 1년 최고가 대비 낙폭, 최근 1개월 수익률, RSI
+  - 골든크로스/데드크로스 상태와 시작일, 그리고 시장 경보와 함께 본 한 줄 해석
+  - 어떤 종목을 보여 줄지는 `config/settings.yaml`의 `report.trend_cards`로 정합니다. `null`이면 직접 추가한 종목 전체(전략용 종목·현금성 자산 제외), 목록을 적으면 그 종목만 보여 줍니다.
 - **매일 볼 때:** `python main.py --step collect && python main.py --step clean && python main.py --step indicators && python main.py --step report`
 
 ---
@@ -258,7 +265,7 @@ python main.py --step charts
 |---|---|
 | 전체 실행 (①~⑥ + 오늘의 리포트) | `python main.py` |
 | 오늘의 시장 상태만 보기 | `python main.py --step report` → `reports/market_today.html` 열기 |
-| 새 종목 분석 | `python main.py --step collect --ticker 005930`<br>`python main.py --step clean --ticker 005930`<br>`python main.py --step indicators --ticker 005930` |
+| 새 종목 분석 | `python main.py --step collect --ticker 005930`<br>`python main.py --step clean --ticker 005930`<br>`python main.py --step indicators --ticker 005930`<br>`python main.py --step report` → '내 종목 추세'에 카드 추가 |
 | 설정만 바꾸고 다시 시험 | `config/settings.yaml` 수정 → `python main.py --step backtest` |
 
 - 한 단계만 다시 돌리면 그 뒤 단계의 파일은 예전 상태로 남습니다. 예를 들어 ②를 다시 돌렸으면 ③과 ④도 다시 돌려야 결과에 반영됩니다.

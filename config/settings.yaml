@@ -78,3 +78,8 @@ optimize:
 
 report:
   output_dir: "reports"
+  # 리포트 '내 종목 추세' 카드에 보여 줄 종목.
+  # null이면 직접 추가한 종목(--ticker로 받은 것) 전체를 자동으로 보여 준다
+  #   (위 universe·canary·optimize에 있는 전략용 종목과 현금성 자산은 제외).
+  # 특정 종목만 보고 싶으면 목록으로 적는다. 예: ["005930", "000660", "NVDA"]
+  trend_cards: null
